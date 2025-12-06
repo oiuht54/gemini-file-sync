@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         AI Studio Workspace Manager (v9.1 - Instant Undo)
+// @name         AI Studio Workspace Manager (v10.1 - Active Dir Display)
 // @namespace    http://tampermonkey.net/
-// @version      9.1
-// @description  Adds "Undo Last Sync" capability without annoying confirmation dialogs.
+// @version      10.1
+// @description  Shows the currently active server directory explicitly.
 // @author       Gemini 3 Architect
 // @match        https://aistudio.google.com/*
 // @grant        none
@@ -40,7 +40,7 @@
     // --- UI COMPONENTS ---
     const UI = {
         root: null, header: null, body: null, statusDot: null,
-        pathInput: null, historySelect: null, statusLabel: null,
+        pathInput: null, historySelect: null, activeRootLabel: null, statusLabel: null,
         fileList: null, syncBtn: null, undoBtn: null, scanBtn: null, toggleBtn: null,
 
         init() {
@@ -101,10 +101,11 @@
                 display: State.isCollapsed ? 'none' : 'flex', flexDirection: 'column', padding: '12px', gap: '10px' 
             });
 
+            // Settings Row (Input)
             const settings = el('div', { display: 'flex', gap: '5px' });
             this.pathInput = el('input', {
                 flex: '1', background: '#222', border: '1px solid #444', color: '#fff', padding: '8px', borderRadius: '4px'
-            }, { placeholder: 'Project Root...' });
+            }, { placeholder: 'Change Project Root...' });
             
             const dl = document.createElement('datalist'); dl.id = 'br-hist'; document.body.appendChild(dl);
             this.historySelect = dl;
@@ -115,6 +116,12 @@
             }, { textContent: 'SET' });
             setBtn.onclick = Logic.setProjectRoot;
             settings.append(this.pathInput, setBtn);
+
+            // Active Path Display (NEW)
+            this.activeRootLabel = el('div', {
+                fontSize: '10px', color: '#888', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+                padding: '0 2px', cursor: 'help'
+            }, { textContent: '📂 Connecting...' });
 
             this.statusLabel = el('div', { textAlign: 'center', color: '#888', padding: '4px' }, 'Idle');
             
@@ -142,7 +149,7 @@
 
             actionsRow.append(this.syncBtn, this.undoBtn);
 
-            this.body.append(settings, this.statusLabel, this.fileList, actionsRow);
+            this.body.append(settings, this.activeRootLabel, this.statusLabel, this.fileList, actionsRow);
             this.root.append(this.header, this.body);
             document.body.appendChild(this.root);
         },
@@ -159,11 +166,25 @@
         updateStatus(connected, data) {
             this.statusDot.style.backgroundColor = connected ? CONFIG.COLORS.success : CONFIG.COLORS.error;
             if (connected && data) {
-                if (data.cwd && this.pathInput.value !== data.cwd) this.pathInput.value = data.cwd;
+                // Update Active Label
+                if (data.cwd) {
+                    this.activeRootLabel.textContent = `📂 ${data.cwd}`;
+                    this.activeRootLabel.title = data.cwd; // Full path on hover
+                    this.activeRootLabel.style.color = '#aaa';
+                }
+                
+                // Only update input if empty (to avoid overwriting user typing)
+                if (this.pathInput.value === '') {
+                    this.pathInput.value = data.cwd;
+                }
+
                 if (data.history) {
                     clearChildren(this.historySelect);
                     data.history.forEach(p => this.historySelect.appendChild(el('option', { value: p })));
                 }
+            } else {
+                this.activeRootLabel.textContent = '🔌 Disconnected';
+                this.activeRootLabel.style.color = CONFIG.COLORS.error;
             }
         },
 
@@ -224,7 +245,10 @@
                     method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({path})
                 });
                 const data = await res.json();
-                if(data.success) UI.updateStatus(true, data);
+                if(data.success) {
+                    UI.pathInput.value = ''; // Clear input on success to show we accepted it
+                    UI.updateStatus(true, data);
+                }
             } catch { alert("Connection Error"); }
         },
         async syncFiles() {
@@ -249,15 +273,11 @@
             }
         },
         async rollback() {
-            // NO CONFIRMATION - Instant Action
             UI.undoBtn.textContent = "...";
             try {
                 const res = await fetch(`${CONFIG.API_BASE}/rollback`, { method: 'POST' });
                 const data = await res.json();
                 if (data.success) {
-                    // Alert replaced by simple console log or non-blocking notification if desired,
-                    // but for now kept alert for success status as it's an important action.
-                    // Or we can just flash the button.
                     UI.undoBtn.textContent = "REVERTED";
                     setTimeout(() => {
                         UI.undoBtn.textContent = "UNDO";
@@ -287,25 +307,15 @@
             return isValid ? p : null;
         },
 
-        isInLastMessageBubble(codeBlock) {
-            let container = codeBlock;
-            for (let i = 0; i < 12; i++) {
-                if (!container.parentElement) break;
-                const parent = container.parentElement;
-                if (parent.childElementCount > 1) {
-                    if (parent.lastElementChild === container) {
-                        return true; 
-                    } else {
-                        const last = parent.lastElementChild;
-                        if (last.innerText.trim() === '' || last.tagName.includes('LOADER')) {
-                            if (last.previousElementSibling === container) return true;
-                        }
-                        return false;
-                    }
+        getScope(lastBlock) {
+            let scope = lastBlock;
+            for (let i = 0; i < 6; i++) {
+                if (scope.parentElement) scope = scope.parentElement;
+                if (scope.tagName && (scope.tagName.includes('CHUNK') || scope.classList.contains('model-response-container'))) {
+                    return scope;
                 }
-                container = parent;
             }
-            return true;
+            return scope;
         },
 
         scan() {
@@ -315,22 +325,19 @@
                     this.currentFiles = []; UI.renderFiles([]); return;
                 }
 
+                // TRUST THE LAST BLOCK
                 const lastBlock = allBlocks[allBlocks.length - 1];
-
-                if (!this.isInLastMessageBubble(lastBlock)) {
-                    this.currentFiles = [];
-                    UI.renderFiles([]);
-                    return;
-                }
-
-                const activeBlocks = allBlocks.filter(b => this.isInLastMessageBubble(b));
-                const headers = Array.from(document.querySelectorAll('h3, h4, strong, p, span'));
+                const scope = this.getScope(lastBlock);
+                const activeBlocks = Array.from(scope.querySelectorAll('ms-code-block'));
+                const headers = Array.from(scope.querySelectorAll('h3, h4, strong, p, span'));
+                
                 const fileMap = new Map();
 
                 activeBlocks.forEach(block => {
                     const codeEl = block.querySelector('code');
                     if (!codeEl) return;
-                    const content = codeEl.textContent; // Read hidden
+                    
+                    const content = codeEl.textContent;
                     if (!content) return;
 
                     let bestPath = null;
