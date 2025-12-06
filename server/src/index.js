@@ -7,205 +7,240 @@ const chalk = require('chalk');
 
 // --- CONSTANTS ---
 const CONFIG_FILE = path.join(__dirname, '..', 'bridge_history.json');
+const MAX_HISTORY_ITEMS = 50; // Храним только последние 50 синхронизаций
 const PORT = 3000;
 
-// --- CONFIGURATION SERVICE ---
-// Handles persistence of project paths
+// --- CONFIG SERVICE ---
 class ConfigService {
     constructor() {
-        this.data = {
-            currentRoot: process.cwd(),
-            history: []
-        };
+        this.data = { currentRoot: process.cwd(), history: [] };
         this.load();
     }
-
     load() {
         try {
             if (fs.existsSync(CONFIG_FILE)) {
-                const raw = fs.readFileSync(CONFIG_FILE, 'utf8');
-                const loaded = JSON.parse(raw);
+                const loaded = fs.readJsonSync(CONFIG_FILE);
                 if (loaded.currentRoot && fs.existsSync(loaded.currentRoot)) {
                     this.data.currentRoot = loaded.currentRoot;
                 }
-                if (Array.isArray(loaded.history)) {
-                    this.data.history = loaded.history;
-                }
+                if (Array.isArray(loaded.history)) this.data.history = loaded.history;
             }
-        } catch (e) {
-            console.error(chalk.red('Error loading config, using defaults.'));
-        }
+        } catch (e) { console.error('Config load error:', e.message); }
     }
-
     save() {
         try {
-            // Validate history uniqueness and existence
-            this.data.history = [...new Set(this.data.history)]
-                .filter(p => fs.existsSync(p))
-                .slice(0, 10); // Keep last 10
-
+            this.data.history = [...new Set(this.data.history)].filter(p => fs.existsSync(p)).slice(0, 10);
             fs.writeJsonSync(CONFIG_FILE, this.data, { spaces: 2 });
-        } catch (e) {
-            console.error(chalk.red('Failed to save config:'), e.message);
-        }
+        } catch (e) { console.error('Config save error:', e.message); }
     }
-
     setRoot(newPath) {
-        if (!fs.existsSync(newPath)) {
-            throw new Error(`Directory does not exist: ${newPath}`);
-        }
+        if (!fs.existsSync(newPath)) throw new Error(`Path not found: ${newPath}`);
         this.data.currentRoot = path.resolve(newPath);
-        // Add to history (unshift to top)
         this.data.history = [this.data.currentRoot, ...this.data.history];
         this.save();
         console.log(chalk.yellow(`\nContext switched to: ${this.data.currentRoot}`));
     }
-
-    getCurrentRoot() {
-        return this.data.currentRoot;
-    }
-
-    getHistory() {
-        return this.data.history;
-    }
+    getCurrentRoot() { return this.data.currentRoot; }
+    getHistory() { return this.data.history; }
 }
 
-// --- FILE SERVICE ---
-// Handles path normalization and safe writing
-class FileService {
+// --- TRANSACTION MANAGER (UPDATED) ---
+class TransactionManager {
     constructor(configService) {
         this.config = configService;
     }
 
+    getTransactionDir() {
+        return path.join(this.config.getCurrentRoot(), '.ai-bridge', 'transactions');
+    }
+
     /**
-     * Converts "res://scripts/main.gd" -> "C:/Project/scripts/main.gd"
+     * Creates new transaction and CLEANS UP old ones.
      */
-    resolvePath(rawPath) {
-        const root = this.config.getCurrentRoot();
-        let cleanPath = rawPath.trim();
+    async beginTransaction() {
+        const txRoot = this.getTransactionDir();
+        const id = new Date().toISOString().replace(/[:.]/g, '-');
+        const dir = path.join(txRoot, id);
 
-        // 1. Remove Godot/Url prefixes
-        cleanPath = cleanPath
-            .replace(/^res:\/\//, '')
-            .replace(/^user:\/\//, 'user_data/') // Map user:// to a folder named user_data
-            .replace(/^file:\/\//, '');
+        await fs.ensureDir(dir);
+        await fs.writeJson(path.join(dir, 'manifest.json'), []);
 
-        // 2. Remove leading slashes/dots to ensure relative path
-        // e.g. "/src/main" -> "src/main"
-        cleanPath = cleanPath.replace(/^[\/\\]+/, '').replace(/^\.[\/\\]+/, '');
+        // Trigger cleanup asynchronously (don't block the sync)
+        this.pruneOldTransactions().catch(err => console.error("Cleanup failed:", err));
 
-        // 3. Resolve absolute
-        const absolutePath = path.resolve(root, cleanPath);
-
-        // 4. Security Check (Sandbox)
-        if (!absolutePath.startsWith(root)) {
-            throw new Error(`Security Violation: Path ${cleanPath} is outside project root.`);
-        }
-
-        return { absolutePath, relativePath: cleanPath };
+        return { id, dir };
     }
 
-    async write(rawPath, content) {
-        const { absolutePath, relativePath } = this.resolvePath(rawPath);
+    /**
+     * Deletes old transactions, keeping only MAX_HISTORY_ITEMS.
+     */
+    async pruneOldTransactions() {
+        const txRoot = this.getTransactionDir();
+        if (!await fs.pathExists(txRoot)) return;
 
-        // Check state
-        const exists = await fs.pathExists(absolutePath);
-        const status = exists ? 'UPDATED' : 'CREATED';
+        // Get all transaction folders
+        const dirs = await fs.readdir(txRoot);
+        // ISO timestamps sort alphabetically correctly (oldest first)
+        dirs.sort();
 
-        // Backup if updating
-        if (exists) {
-            await this.createBackup(absolutePath, relativePath);
+        // If we have more than limit
+        if (dirs.length > MAX_HISTORY_ITEMS) {
+            const toDeleteCount = dirs.length - MAX_HISTORY_ITEMS;
+            const toDelete = dirs.slice(0, toDeleteCount);
+
+            console.log(chalk.gray(`[Auto-Cleanup] Removing ${toDeleteCount} old backups...`));
+
+            for (const folder of toDelete) {
+                await fs.remove(path.join(txRoot, folder));
+            }
         }
-
-        // Ensure directory structure (Create directories if missing)
-        await fs.ensureDir(path.dirname(absolutePath));
-
-        // Write
-        await fs.writeFile(absolutePath, content, 'utf8');
-
-        return { path: relativePath, status };
     }
 
-    async createBackup(absolutePath, relativePath) {
+    async recordOperation(txDir, relativePath, operationType) {
         const root = this.config.getCurrentRoot();
-        const backupRoot = path.join(root, '.ai-bridge', 'backups');
-        const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+        const absolutePath = path.join(root, relativePath);
+        const manifestPath = path.join(txDir, 'manifest.json');
 
-        const backupPath = path.join(backupRoot, timestamp, relativePath);
+        const manifest = await fs.readJson(manifestPath);
+        manifest.push({ path: relativePath, type: operationType });
+        await fs.writeJson(manifestPath, manifest, { spaces: 2 });
 
-        await fs.ensureDir(path.dirname(backupPath));
-        await fs.copy(absolutePath, backupPath);
+        if (operationType === 'MODIFIED') {
+            const backupPath = path.join(txDir, 'files', relativePath);
+            await fs.ensureDir(path.dirname(backupPath));
+            await fs.copy(absolutePath, backupPath);
+        }
+    }
+
+    async rollbackLast() {
+        const txRoot = this.getTransactionDir();
+        if (!await fs.pathExists(txRoot)) throw new Error("No transactions found.");
+
+        const dirs = (await fs.readdir(txRoot)).sort().reverse();
+        if (dirs.length === 0) throw new Error("No history to undo.");
+
+        const lastTxId = dirs[0];
+        const txDir = path.join(txRoot, lastTxId);
+        const manifestPath = path.join(txDir, 'manifest.json');
+
+        console.log(chalk.yellow(`\n[Rollback] Reverting transaction: ${lastTxId}`));
+        const manifest = await fs.readJson(manifestPath);
+        const root = this.config.getCurrentRoot();
+        const results = [];
+
+        for (const item of manifest.reverse()) {
+            const targetPath = path.join(root, item.path);
+            if (item.type === 'CREATED') {
+                if (await fs.pathExists(targetPath)) {
+                    await fs.remove(targetPath);
+                    results.push(`Deleted ${item.path}`);
+                }
+            } else if (item.type === 'MODIFIED') {
+                const backupPath = path.join(txDir, 'files', item.path);
+                if (await fs.pathExists(backupPath)) {
+                    await fs.copy(backupPath, targetPath, { overwrite: true });
+                    results.push(`Restored ${item.path}`);
+                }
+            }
+        }
+
+        await fs.remove(txDir);
+        console.log(chalk.green(`[Rollback] Success.`));
+        return { count: results.length, lastTxId };
     }
 }
 
-// --- MAIN SERVER SETUP ---
+// --- FILE SERVICE ---
+class FileService {
+    constructor(configService, txManager) {
+        this.config = configService;
+        this.tx = txManager;
+    }
 
+    resolvePath(rawPath) {
+        const root = this.config.getCurrentRoot();
+        let cleanPath = rawPath.trim()
+            .replace(/^res:\/\//, '')
+            .replace(/^user:\/\//, 'user_data/')
+            .replace(/^file:\/\//, '')
+            .replace(/^[\/\\]+/, '')
+            .replace(/^\.[\/\\]+/, '');
+
+        const absolutePath = path.resolve(root, cleanPath);
+        if (!absolutePath.startsWith(root)) throw new Error(`Security Violation: ${cleanPath}`);
+        return { absolutePath, relativePath: cleanPath };
+    }
+
+    async performSync(files) {
+        const { dir: txDir } = await this.tx.beginTransaction();
+        const results = [];
+
+        for (const f of files) {
+            try {
+                const { absolutePath, relativePath } = this.resolvePath(f.path);
+                const exists = await fs.pathExists(absolutePath);
+                const status = exists ? 'MODIFIED' : 'CREATED';
+
+                await this.tx.recordOperation(txDir, relativePath, status);
+
+                await fs.ensureDir(path.dirname(absolutePath));
+                await fs.writeFile(absolutePath, f.content, 'utf8');
+
+                const icon = status === 'CREATED' ? '✨' : '📝';
+                const color = status === 'CREATED' ? chalk.magenta : chalk.green;
+                console.log(`${icon} ${color(status)}: ${relativePath}`);
+
+                results.push({ path: relativePath, status });
+            } catch (e) {
+                console.error(chalk.red(`✖ ERROR: ${f.path} - ${e.message}`));
+                results.push({ path: f.path, status: 'ERROR', error: e.message });
+            }
+        }
+        return results;
+    }
+}
+
+// --- MAIN ---
 const app = express();
 const configService = new ConfigService();
-const fileService = new FileService(configService);
+const txManager = new TransactionManager(configService);
+const fileService = new FileService(configService, txManager);
 
 app.use(cors());
 app.use(bodyParser.json({ limit: '50mb' }));
 
-// 1. Get Status (UI Polling)
 app.get('/status', (req, res) => {
-    res.json({
-        active: true,
-        cwd: configService.getCurrentRoot(),
-        history: configService.getHistory(),
-        version: '2.0'
-    });
+    res.json({ cwd: configService.getCurrentRoot(), history: configService.getHistory() });
 });
 
-// 2. Change Root Endpoint
 app.post('/config/root', (req, res) => {
     try {
-        const { path: newPath } = req.body;
-        if (!newPath) throw new Error("Path is required");
-
-        configService.setRoot(newPath);
+        configService.setRoot(req.body.path);
         res.json({ success: true, cwd: configService.getCurrentRoot() });
+    } catch (e) { res.status(400).json({ success: false, error: e.message }); }
+});
+
+app.post('/sync', async (req, res) => {
+    try {
+        console.log(chalk.blue(`\n[Sync] Started...`));
+        const results = await fileService.performSync(req.body.files);
+        res.json({ success: true, results });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/rollback', async (req, res) => {
+    try {
+        const result = await txManager.rollbackLast();
+        res.json({ success: true, ...result });
     } catch (e) {
+        console.error(chalk.red(`[Rollback Failed] ${e.message}`));
         res.status(400).json({ success: false, error: e.message });
     }
 });
 
-// 3. Sync Files Endpoint
-app.post('/sync', async (req, res) => {
-    try {
-        const { files } = req.body;
-        if (!files || !Array.isArray(files)) return res.status(400).send("Invalid payload");
-
-        console.log(chalk.blue(`\n[Sync] Processing ${files.length} files into: ${chalk.bold(configService.getCurrentRoot())}`));
-
-        const results = [];
-        for (const f of files) {
-            try {
-                const result = await fileService.write(f.path, f.content);
-                const icon = result.status === 'CREATED' ? '✨' : '📝';
-                const color = result.status === 'CREATED' ? chalk.magenta : chalk.green;
-
-                console.log(`${icon} ${color(result.status)}: ${result.path}`);
-                results.push({ ...result, success: true });
-            } catch (e) {
-                console.error(chalk.red(`✖ ERROR: ${f.path} - ${e.message}`));
-                results.push({ path: f.path, success: false, error: e.message });
-            }
-        }
-
-        res.json({ success: true, results });
-    } catch (e) {
-        console.error(e);
-        res.status(500).json({ error: e.message });
-    }
-});
-
-// Start
 app.listen(PORT, () => {
     console.log(chalk.cyan('='.repeat(50)));
-    console.log(chalk.bold.yellow(' AI STUDIO WORKSPACE MANAGER v2.0 '));
+    console.log(chalk.bold.yellow(' AI BRIDGE v2.4 (Auto-Cleanup Enabled) '));
     console.log(chalk.cyan('='.repeat(50)));
-    console.log(`Current Project: ${chalk.green(configService.getCurrentRoot())}`);
-    console.log(`History stored in: ${chalk.gray(CONFIG_FILE)}`);
-    console.log(`Server running on http://localhost:${PORT}`);
+    console.log(`Root: ${configService.getCurrentRoot()}`);
 });

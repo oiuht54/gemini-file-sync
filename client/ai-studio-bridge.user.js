@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         AI Studio Workspace Manager (v8.1 - Big Buttons)
+// @name         AI Studio Workspace Manager (v9.1 - Instant Undo)
 // @namespace    http://tampermonkey.net/
-// @version      8.1
-// @description  Larger UI controls. Reads collapsed/hidden code blocks.
+// @version      9.1
+// @description  Adds "Undo Last Sync" capability without annoying confirmation dialogs.
 // @author       Gemini 3 Architect
 // @match        https://aistudio.google.com/*
 // @grant        none
@@ -15,8 +15,8 @@
         API_BASE: 'http://localhost:3000',
         COLORS: {
             bg: '#121212', bgHeader: '#1e1e1e', border: '#333',
-            accent: '#0d96f2', success: '#4caf50', error: '#f44336', text: '#e0e0e0',
-            btnBg: '#333', btnHover: '#444'
+            accent: '#0d96f2', success: '#4caf50', error: '#f44336', warn: '#ff9800',
+            text: '#e0e0e0', btnBg: '#333', btnHover: '#444'
         }
     };
 
@@ -41,16 +41,16 @@
     const UI = {
         root: null, header: null, body: null, statusDot: null,
         pathInput: null, historySelect: null, statusLabel: null,
-        fileList: null, syncBtn: null, scanBtn: null, toggleBtn: null,
+        fileList: null, syncBtn: null, undoBtn: null, scanBtn: null, toggleBtn: null,
 
         init() {
             const old = document.getElementById('ai-bridge-v2');
             if (old) old.remove();
 
-            // Root Container
+            // Root
             this.root = el('div', {
                 position: 'fixed', bottom: '20px', right: '20px',
-                width: State.isCollapsed ? '220px' : '340px', // Slightly wider collapsed state for big buttons
+                width: State.isCollapsed ? '220px' : '340px',
                 backgroundColor: CONFIG.COLORS.bg,
                 border: `1px solid ${CONFIG.COLORS.border}`, borderRadius: '8px',
                 fontFamily: 'Consolas, monospace', fontSize: '12px', color: CONFIG.COLORS.text,
@@ -63,69 +63,42 @@
             this.header = el('div', {
                 padding: '8px 12px', backgroundColor: CONFIG.COLORS.bgHeader,
                 borderBottom: State.isCollapsed ? 'none' : `1px solid ${CONFIG.COLORS.border}`,
-                display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-                height: '40px' // Fixed height for header
+                display: 'flex', justifyContent: 'space-between', alignItems: 'center', height: '40px'
             });
 
-            // Title
             const titleRow = el('div', { display: 'flex', alignItems: 'center', gap: '10px' });
             this.statusDot = el('div', {
                 width: '12px', height: '12px', borderRadius: '50%', backgroundColor: '#555', cursor: 'help'
             }, { title: 'Checking connection...' });
-            
-            const titleText = el('span', { fontWeight: 'bold', fontSize: '13px' }, 'AI BRIDGE');
-            titleRow.append(this.statusDot, titleText);
+            titleRow.append(this.statusDot, el('span', { fontWeight: 'bold', fontSize: '13px' }, 'AI BRIDGE'));
 
-            // Controls (Scan + Minimize) - NOW BIGGER
             const controlsRow = el('div', { display: 'flex', gap: '8px' });
-            
             const btnStyle = {
-                background: CONFIG.COLORS.btnBg,
-                border: '1px solid #444',
-                color: '#fff',
-                cursor: 'pointer',
-                fontSize: '16px',
-                padding: '0',
-                width: '32px',
-                height: '32px',
-                borderRadius: '4px',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                transition: 'background 0.2s'
+                background: CONFIG.COLORS.btnBg, border: '1px solid #444', color: '#fff', cursor: 'pointer',
+                fontSize: '16px', padding: '0', width: '32px', height: '32px', borderRadius: '4px',
+                display: 'flex', alignItems: 'center', justifyContent: 'center'
             };
 
             this.scanBtn = el('button', btnStyle, { textContent: '↻', title: 'Force Scan' });
-            this.scanBtn.onmouseover = () => this.scanBtn.style.background = CONFIG.COLORS.btnHover;
-            this.scanBtn.onmouseout = () => this.scanBtn.style.background = CONFIG.COLORS.btnBg;
             this.scanBtn.onclick = (e) => { 
                 e.stopPropagation(); 
                 this.scanBtn.style.transform = 'rotate(360deg)';
                 this.scanBtn.style.transition = 'transform 0.4s';
-                setTimeout(() => { this.scanBtn.style.transform = 'none'; this.scanBtn.style.transition = 'background 0.2s'; }, 400);
+                setTimeout(() => { this.scanBtn.style.transform = 'none'; this.scanBtn.style.transition = ''; }, 400);
                 Logic.checkServer(); 
                 Scanner.scan(); 
             };
 
-            this.toggleBtn = el('button', btnStyle, { textContent: State.isCollapsed ? '+' : '−', title: 'Minimize/Maximize' });
-            this.toggleBtn.onmouseover = () => this.toggleBtn.style.background = CONFIG.COLORS.btnHover;
-            this.toggleBtn.onmouseout = () => this.toggleBtn.style.background = CONFIG.COLORS.btnBg;
+            this.toggleBtn = el('button', btnStyle, { textContent: State.isCollapsed ? '+' : '−', title: 'Minimize' });
             this.toggleBtn.onclick = (e) => { e.stopPropagation(); this.toggleCollapse(); };
 
             controlsRow.append(this.scanBtn, this.toggleBtn);
             this.header.append(titleRow, controlsRow);
-
-            // Click header to toggle (except buttons)
-            this.header.onclick = (e) => {
-                if (e.target !== this.scanBtn && e.target !== this.toggleBtn && e.target.parentNode !== this.scanBtn && e.target.parentNode !== this.toggleBtn) {
-                    this.toggleCollapse();
-                }
-            };
+            this.header.onclick = (e) => { if (e.target.tagName !== 'BUTTON') this.toggleCollapse(); };
 
             // Body
             this.body = el('div', { 
-                display: State.isCollapsed ? 'none' : 'flex', 
-                flexDirection: 'column', padding: '12px', gap: '10px' 
+                display: State.isCollapsed ? 'none' : 'flex', flexDirection: 'column', padding: '12px', gap: '10px' 
             });
 
             const settings = el('div', { display: 'flex', gap: '5px' });
@@ -150,13 +123,26 @@
                 padding: '5px', display: 'flex', flexDirection: 'column', gap: '2px', borderRadius: '4px'
             });
 
+            // Actions
+            const actionsRow = el('div', { display: 'flex', gap: '5px' });
+
             this.syncBtn = el('button', {
-                padding: '14px', background: '#222', color: '#555', border: 'none', fontWeight: 'bold', cursor: 'not-allowed', borderRadius: '4px', fontSize: '13px'
+                flex: '2', padding: '14px', background: '#222', color: '#555', border: 'none', fontWeight: 'bold', 
+                cursor: 'not-allowed', borderRadius: '4px', fontSize: '13px'
             }, { textContent: 'NO FILES' });
             this.syncBtn.disabled = true;
             this.syncBtn.onclick = Logic.syncFiles;
 
-            this.body.append(settings, this.statusLabel, this.fileList, this.syncBtn);
+            this.undoBtn = el('button', {
+                flex: '1', padding: '14px', background: '#222', color: '#555', border: 'none', fontWeight: 'bold', 
+                cursor: 'not-allowed', borderRadius: '4px', fontSize: '13px'
+            }, { textContent: 'UNDO', title: 'Instant Rollback' });
+            this.undoBtn.disabled = true;
+            this.undoBtn.onclick = Logic.rollback;
+
+            actionsRow.append(this.syncBtn, this.undoBtn);
+
+            this.body.append(settings, this.statusLabel, this.fileList, actionsRow);
             this.root.append(this.header, this.body);
             document.body.appendChild(this.root);
         },
@@ -164,7 +150,6 @@
         toggleCollapse() {
             State.isCollapsed = !State.isCollapsed;
             localStorage.setItem('ai_bridge_collapsed', State.isCollapsed);
-            
             this.root.style.width = State.isCollapsed ? '220px' : '340px';
             this.body.style.display = State.isCollapsed ? 'none' : 'flex';
             this.header.style.borderBottom = State.isCollapsed ? 'none' : `1px solid ${CONFIG.COLORS.border}`;
@@ -180,6 +165,13 @@
                     data.history.forEach(p => this.historySelect.appendChild(el('option', { value: p })));
                 }
             }
+        },
+
+        enableUndo(enabled) {
+            this.undoBtn.disabled = !enabled;
+            this.undoBtn.style.background = enabled ? CONFIG.COLORS.warn : '#222';
+            this.undoBtn.style.color = enabled ? '#000' : '#555';
+            this.undoBtn.style.cursor = enabled ? 'pointer' : 'not-allowed';
         },
 
         renderFiles(files) {
@@ -239,6 +231,7 @@
             const files = Scanner.currentFiles;
             if(!files || !files.length) return;
             UI.syncBtn.textContent = "WRITING...";
+            UI.syncBtn.disabled = true;
             try {
                 const res = await fetch(`${CONFIG.API_BASE}/sync`, {
                     method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({files})
@@ -247,9 +240,37 @@
                 if(data.success) {
                     UI.syncBtn.textContent = "DONE ✓";
                     UI.syncBtn.style.background = CONFIG.COLORS.success;
+                    UI.enableUndo(true);
                     setTimeout(() => Scanner.scan(), 3000);
                 }
-            } catch { UI.syncBtn.textContent = "ERROR"; UI.syncBtn.style.background = CONFIG.COLORS.error; }
+            } catch { 
+                UI.syncBtn.textContent = "ERROR"; 
+                UI.syncBtn.style.background = CONFIG.COLORS.error; 
+            }
+        },
+        async rollback() {
+            // NO CONFIRMATION - Instant Action
+            UI.undoBtn.textContent = "...";
+            try {
+                const res = await fetch(`${CONFIG.API_BASE}/rollback`, { method: 'POST' });
+                const data = await res.json();
+                if (data.success) {
+                    // Alert replaced by simple console log or non-blocking notification if desired,
+                    // but for now kept alert for success status as it's an important action.
+                    // Or we can just flash the button.
+                    UI.undoBtn.textContent = "REVERTED";
+                    setTimeout(() => {
+                        UI.undoBtn.textContent = "UNDO";
+                        UI.enableUndo(false);
+                    }, 1500);
+                } else {
+                    alert(`Rollback failed: ${data.error}`);
+                    UI.undoBtn.textContent = "UNDO";
+                }
+            } catch(e) {
+                alert("Connection error during rollback");
+                UI.undoBtn.textContent = "UNDO";
+            }
         }
     };
 
@@ -309,9 +330,7 @@
                 activeBlocks.forEach(block => {
                     const codeEl = block.querySelector('code');
                     if (!codeEl) return;
-                    
-                    // Use textContent to read hidden/collapsed code
-                    const content = codeEl.textContent; 
+                    const content = codeEl.textContent; // Read hidden
                     if (!content) return;
 
                     let bestPath = null;
