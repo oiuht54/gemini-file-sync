@@ -1,0 +1,30 @@
+# --- Dependencies ---
+node_modules/
+package-lock.json
+
+# --- Logs ---
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+logs/
+*.log
+
+# --- Local Configuration (CRITICAL) ---
+# Игнорируем историю путей, так как это личная информация
+server/bridge_history.json
+server/config.json
+
+# --- Backups (CRITICAL) ---
+# Игнорируем папку с бэкапами, которые создает скрипт
+.ai-bridge/
+**/.ai-bridge/
+
+# --- OS Junk ---
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# --- IDE Settings ---
+.vscode/
+.idea/
+*.swp

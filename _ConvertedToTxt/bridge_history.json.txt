@@ -1,0 +1,7 @@
+﻿{
+"currentRoot": "C:\\Users\\wrigh\\WebstormProjects\\ai-studio-local-bridge\\server",
+"history": [
+"C:\\Users\\wrigh\\WebstormProjects\\ai-studio-local-bridge\\server",
+"C:\\Users\\wrigh\\WebstormProjects\\ai-studio-local-bridge\\server\\src"
+]
+}
