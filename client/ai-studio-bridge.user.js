@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         AI Studio Workspace Manager (v11.0 - Thumb Anchor)
+// @name         AI Studio Workspace Manager (v12.1 - Visual Feedback)
 // @namespace    http://tampermonkey.net/
-// @version      11.0
-// @description  Uses the 'Thumb Up' icon to strictly identify the latest AI response container.
+// @version      12.1
+// @description  Adds visual feedback to the SET button. Includes Target Mode & Instant Undo.
 // @author       Gemini 3 Architect
 // @match        https://aistudio.google.com/*
 // @grant        none
@@ -16,13 +16,16 @@
         COLORS: {
             bg: '#121212', bgHeader: '#1e1e1e', border: '#333',
             accent: '#0d96f2', success: '#4caf50', error: '#f44336', warn: '#ff9800',
-            text: '#e0e0e0', btnBg: '#333', btnHover: '#444'
+            text: '#e0e0e0', btnBg: '#333', btnHover: '#444',
+            highlight: 'rgba(13, 150, 242, 0.2)', highlightBorder: '#0d96f2'
         }
     };
 
     const State = {
         isCollapsed: localStorage.getItem('ai_bridge_collapsed') === 'true',
-        serverConnected: false
+        serverConnected: false,
+        manualScope: null,
+        isSelecting: false
     };
 
     // --- DOM HELPERS ---
@@ -37,20 +40,103 @@
     }
     function clearChildren(node) { while (node.firstChild) node.removeChild(node.firstChild); }
 
+    // --- SELECTOR TOOL ---
+    const Selector = {
+        overlay: null,
+        hoveredElement: null,
+
+        init() {
+            const style = document.createElement('style');
+            style.textContent = `
+                .ai-bridge-target-hover {
+                    outline: 2px solid ${CONFIG.COLORS.highlightBorder} !important;
+                    background-color: ${CONFIG.COLORS.highlight} !important;
+                    cursor: crosshair !important;
+                }
+            `;
+            document.head.appendChild(style);
+        },
+
+        toggle() {
+            if (State.isSelecting) this.disable();
+            else this.enable();
+        },
+
+        enable() {
+            State.isSelecting = true;
+            UI.targetBtn.style.color = CONFIG.COLORS.accent;
+            document.body.style.cursor = 'crosshair';
+            document.addEventListener('mouseover', this.handleHover, true);
+            document.addEventListener('click', this.handleClick, true);
+            document.addEventListener('keydown', this.handleKey);
+        },
+
+        disable() {
+            State.isSelecting = false;
+            UI.targetBtn.style.color = '#fff';
+            document.body.style.cursor = 'default';
+            if (this.hoveredElement) {
+                this.hoveredElement.classList.remove('ai-bridge-target-hover');
+                this.hoveredElement = null;
+            }
+            document.removeEventListener('mouseover', this.handleHover, true);
+            document.removeEventListener('click', this.handleClick, true);
+            document.removeEventListener('keydown', this.handleKey);
+        },
+
+        getContainer(target) {
+            let curr = target;
+            for (let i = 0; i < 8; i++) {
+                if (!curr || curr === document.body) return null;
+                if (curr.querySelector('ms-code-block') || curr.tagName === 'MS-CODE-BLOCK') {
+                     if (curr.parentElement && curr.parentElement.childElementCount > 1) {
+                         return curr.parentElement;
+                     }
+                }
+                curr = curr.parentElement;
+            }
+            return target;
+        },
+
+        handleHover: (e) => {
+            e.stopPropagation();
+            if (Selector.hoveredElement) {
+                Selector.hoveredElement.classList.remove('ai-bridge-target-hover');
+            }
+            const container = Selector.getContainer(e.target);
+            if (container && container !== document.body && container.id !== 'ai-bridge-v2') {
+                Selector.hoveredElement = container;
+                container.classList.add('ai-bridge-target-hover');
+            }
+        },
+
+        handleClick: (e) => {
+            e.preventDefault(); e.stopPropagation();
+            if (Selector.hoveredElement) {
+                State.manualScope = Selector.hoveredElement;
+                Selector.disable();
+                Scanner.scan();
+            }
+        },
+
+        handleKey: (e) => { if (e.key === 'Escape') Selector.disable(); }
+    };
+
     // --- UI COMPONENTS ---
     const UI = {
         root: null, header: null, body: null, statusDot: null,
         pathInput: null, historySelect: null, activeRootLabel: null, statusLabel: null,
-        fileList: null, syncBtn: null, undoBtn: null, scanBtn: null, toggleBtn: null,
+        fileList: null, syncBtn: null, undoBtn: null, scanBtn: null, toggleBtn: null, targetBtn: null, setBtn: null,
 
         init() {
+            Selector.init();
             const old = document.getElementById('ai-bridge-v2');
             if (old) old.remove();
 
             // Root
             this.root = el('div', {
                 position: 'fixed', bottom: '20px', right: '20px',
-                width: State.isCollapsed ? '220px' : '340px',
+                width: State.isCollapsed ? '260px' : '340px',
                 backgroundColor: CONFIG.COLORS.bg,
                 border: `1px solid ${CONFIG.COLORS.border}`, borderRadius: '8px',
                 fontFamily: 'Consolas, monospace', fontSize: '12px', color: CONFIG.COLORS.text,
@@ -79,20 +165,23 @@
                 display: 'flex', alignItems: 'center', justifyContent: 'center'
             };
 
-            this.scanBtn = el('button', btnStyle, { textContent: '↻', title: 'Force Scan' });
+            this.targetBtn = el('button', btnStyle, { textContent: '⌖', title: 'Select Message Manually' });
+            this.targetBtn.onclick = (e) => { e.stopPropagation(); Selector.toggle(); };
+
+            this.scanBtn = el('button', btnStyle, { textContent: '↻', title: 'Reset to Auto & Scan' });
             this.scanBtn.onclick = (e) => { 
                 e.stopPropagation(); 
+                State.manualScope = null; Selector.disable();
                 this.scanBtn.style.transform = 'rotate(360deg)';
                 this.scanBtn.style.transition = 'transform 0.4s';
                 setTimeout(() => { this.scanBtn.style.transform = 'none'; this.scanBtn.style.transition = ''; }, 400);
-                Logic.checkServer(); 
-                Scanner.scan(); 
+                Logic.checkServer(); Scanner.scan(); 
             };
 
             this.toggleBtn = el('button', btnStyle, { textContent: State.isCollapsed ? '+' : '−', title: 'Minimize' });
             this.toggleBtn.onclick = (e) => { e.stopPropagation(); this.toggleCollapse(); };
 
-            controlsRow.append(this.scanBtn, this.toggleBtn);
+            controlsRow.append(this.targetBtn, this.scanBtn, this.toggleBtn);
             this.header.append(titleRow, controlsRow);
             this.header.onclick = (e) => { if (e.target.tagName !== 'BUTTON') this.toggleCollapse(); };
 
@@ -110,11 +199,11 @@
             this.historySelect = dl;
             this.pathInput.setAttribute('list', 'br-hist');
 
-            const setBtn = el('button', { 
-                background: '#333', color: '#fff', border: 'none', cursor: 'pointer', padding: '0 12px', borderRadius: '4px', fontWeight: 'bold' 
+            this.setBtn = el('button', { 
+                background: '#333', color: '#fff', border: 'none', cursor: 'pointer', padding: '0 12px', borderRadius: '4px', fontWeight: 'bold', transition: 'background 0.2s' 
             }, { textContent: 'SET' });
-            setBtn.onclick = Logic.setProjectRoot;
-            settings.append(this.pathInput, setBtn);
+            this.setBtn.onclick = Logic.setProjectRoot;
+            settings.append(this.pathInput, this.setBtn);
 
             this.activeRootLabel = el('div', {
                 fontSize: '10px', color: '#888', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
@@ -128,7 +217,6 @@
                 padding: '5px', display: 'flex', flexDirection: 'column', gap: '2px', borderRadius: '4px'
             });
 
-            // Actions
             const actionsRow = el('div', { display: 'flex', gap: '5px' });
 
             this.syncBtn = el('button', {
@@ -155,7 +243,7 @@
         toggleCollapse() {
             State.isCollapsed = !State.isCollapsed;
             localStorage.setItem('ai_bridge_collapsed', State.isCollapsed);
-            this.root.style.width = State.isCollapsed ? '220px' : '340px';
+            this.root.style.width = State.isCollapsed ? '260px' : '340px';
             this.body.style.display = State.isCollapsed ? 'none' : 'flex';
             this.header.style.borderBottom = State.isCollapsed ? 'none' : `1px solid ${CONFIG.COLORS.border}`;
             this.toggleBtn.textContent = State.isCollapsed ? '+' : '−';
@@ -191,17 +279,24 @@
             if (!this.fileList) return; 
             clearChildren(this.fileList);
             
+            if (State.manualScope) {
+                this.statusLabel.textContent = `LOCKED: Manual Selection`;
+                this.statusLabel.style.color = CONFIG.COLORS.warn;
+            } else if (files.length === 0) {
+                this.statusLabel.textContent = "Latest message has no code.";
+                this.statusLabel.style.color = '#555';
+            } else {
+                this.statusLabel.textContent = `Auto: Found ${files.length} file(s)`;
+                this.statusLabel.style.color = CONFIG.COLORS.success;
+            }
+
             if (files.length === 0) {
-                this.statusLabel.textContent = "Last message is text-only.";
                 this.syncBtn.disabled = true;
                 this.syncBtn.textContent = "NO FILES";
                 this.syncBtn.style.background = '#222';
                 this.syncBtn.style.color = '#555';
                 this.syncBtn.style.cursor = 'not-allowed';
             } else {
-                this.statusLabel.textContent = `Found ${files.length} file(s) in last msg`;
-                this.statusLabel.style.color = CONFIG.COLORS.success;
-                
                 this.syncBtn.disabled = false;
                 this.syncBtn.textContent = "SYNC TO DISK";
                 this.syncBtn.style.background = CONFIG.COLORS.accent;
@@ -232,16 +327,44 @@
         async setProjectRoot() {
             const path = UI.pathInput.value.trim();
             if(!path) return;
+            
+            const btn = UI.setBtn;
+            const originalText = btn.textContent;
+            const originalBg = btn.style.background;
+
+            btn.disabled = true;
+            btn.textContent = '...';
+
             try {
                 const res = await fetch(`${CONFIG.API_BASE}/config/root`, {
                     method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({path})
                 });
                 const data = await res.json();
+                
                 if(data.success) {
                     UI.pathInput.value = ''; 
                     UI.updateStatus(true, data);
-                }
-            } catch { alert("Connection Error"); }
+                    
+                    // Success Flash
+                    btn.textContent = 'OK';
+                    btn.style.background = CONFIG.COLORS.success;
+                    
+                    setTimeout(() => {
+                        btn.textContent = originalText;
+                        btn.style.background = originalBg;
+                        btn.disabled = false;
+                    }, 1000);
+                } else { throw new Error(data.error); }
+            } catch(e) { 
+                // Error Flash
+                btn.textContent = 'ERR';
+                btn.style.background = CONFIG.COLORS.error;
+                setTimeout(() => {
+                    btn.textContent = originalText;
+                    btn.style.background = originalBg;
+                    btn.disabled = false;
+                }, 1000);
+            }
         },
         async syncFiles() {
             const files = Scanner.currentFiles;
@@ -257,7 +380,7 @@
                     UI.syncBtn.textContent = "DONE ✓";
                     UI.syncBtn.style.background = CONFIG.COLORS.success;
                     UI.enableUndo(true);
-                    setTimeout(() => Scanner.scan(), 3000);
+                    if (!State.manualScope) setTimeout(() => Scanner.scan(), 3000);
                 }
             } catch { 
                 UI.syncBtn.textContent = "ERROR"; 
@@ -300,52 +423,39 @@
         },
 
         findLastModelResponseContainer() {
-            // STRATEGY: Find the last "Thumb Up" icon.
-            // This icon is unique to Model Responses.
             const icons = Array.from(document.querySelectorAll('mat-icon, i.google-material-icons, span.material-symbols-outlined'));
-            
-            // Look for thumb_up (filled or outline)
-            const thumbIcons = icons.filter(i => {
-                const txt = i.innerText.trim().toLowerCase();
-                return txt.includes('thumb_up');
-            });
-
-            if (thumbIcons.length === 0) return null; // No model response yet?
-
+            const thumbIcons = icons.filter(i => i.innerText.trim().toLowerCase().includes('thumb_up'));
+            if (thumbIcons.length === 0) return null;
             const lastThumb = thumbIcons[thumbIcons.length - 1];
-
-            // Now climb up to find the Message Bubble container.
-            // We want the container that holds the text chunks and code blocks.
-            // Usually it's ~4-6 levels up.
-            // We stop when we hit a container that has multiple siblings (the list item)
-            
             let container = lastThumb;
             for(let i=0; i<8; i++) {
                 if(!container.parentElement) break;
                 container = container.parentElement;
-                
-                // Detection: Does this container have 'ms-code-block' or 'ms-text-chunk' as direct descendants?
-                // Or is it the main wrapper?
-                // Heuristic: If it contains the thumb icon AND has text content, it's likely the wrapper.
-                // Let's rely on finding a container that holds the content.
                 if (container.querySelector('ms-text-chunk') || container.querySelector('ms-code-block')) {
-                    // This is likely the message content wrapper.
-                    // Let's go one level higher to be safe (to catch all chunks).
                     return container.parentElement || container;
                 }
             }
-            return lastThumb.parentElement?.parentElement?.parentElement; // Fallback
+            return lastThumb.parentElement?.parentElement?.parentElement;
         },
 
         scan() {
             try {
-                const scope = this.findLastModelResponseContainer();
+                let scope;
+                if (State.manualScope) {
+                    if (!document.body.contains(State.manualScope)) {
+                        State.manualScope = null;
+                        scope = this.findLastModelResponseContainer();
+                    } else {
+                        scope = State.manualScope;
+                    }
+                } else {
+                    scope = this.findLastModelResponseContainer();
+                }
                 
                 if (!scope) {
                     this.currentFiles = []; UI.renderFiles([]); return;
                 }
 
-                // Scan strictly inside the scope of the Last AI Response
                 const activeBlocks = Array.from(scope.querySelectorAll('ms-code-block'));
                 const headers = Array.from(scope.querySelectorAll('h3, h4, strong, p, span'));
                 const fileMap = new Map();
@@ -353,10 +463,8 @@
                 activeBlocks.forEach(block => {
                     const codeEl = block.querySelector('code');
                     if (!codeEl) return;
-                    
                     const content = codeEl.textContent;
                     if (!content) return;
-
                     let bestPath = null;
                     for (const header of headers) {
                         if (header.compareDocumentPosition(block) & Node.DOCUMENT_POSITION_FOLLOWING) {
