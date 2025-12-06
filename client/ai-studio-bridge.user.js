@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         AI Studio Workspace Manager (v12.1 - Visual Feedback)
+// @name         AI Studio Workspace Manager (v12.2 - Auto-Refresh)
 // @namespace    http://tampermonkey.net/
-// @version      12.1
-// @description  Adds visual feedback to the SET button. Includes Target Mode & Instant Undo.
+// @version      12.2
+// @description  Periodically checks server status to keep active directory in sync.
 // @author       Gemini 3 Architect
 // @match        https://aistudio.google.com/*
 // @grant        none
@@ -13,6 +13,8 @@
 
     const CONFIG = {
         API_BASE: 'http://localhost:3000',
+        SERVER_POLL_INTERVAL: 10000, // 10 seconds heartbeat
+        DOM_SCAN_INTERVAL: 1000,     // 1 second UI update
         COLORS: {
             bg: '#121212', bgHeader: '#1e1e1e', border: '#333',
             accent: '#0d96f2', success: '#4caf50', error: '#f44336', warn: '#ff9800',
@@ -175,7 +177,8 @@
                 this.scanBtn.style.transform = 'rotate(360deg)';
                 this.scanBtn.style.transition = 'transform 0.4s';
                 setTimeout(() => { this.scanBtn.style.transform = 'none'; this.scanBtn.style.transition = ''; }, 400);
-                Logic.checkServer(); Scanner.scan(); 
+                Logic.checkServer(); 
+                Scanner.scan(); 
             };
 
             this.toggleBtn = el('button', btnStyle, { textContent: State.isCollapsed ? '+' : '−', title: 'Minimize' });
@@ -217,6 +220,7 @@
                 padding: '5px', display: 'flex', flexDirection: 'column', gap: '2px', borderRadius: '4px'
             });
 
+            // Actions
             const actionsRow = el('div', { display: 'flex', gap: '5px' });
 
             this.syncBtn = el('button', {
@@ -345,7 +349,6 @@
                     UI.pathInput.value = ''; 
                     UI.updateStatus(true, data);
                     
-                    // Success Flash
                     btn.textContent = 'OK';
                     btn.style.background = CONFIG.COLORS.success;
                     
@@ -356,7 +359,6 @@
                     }, 1000);
                 } else { throw new Error(data.error); }
             } catch(e) { 
-                // Error Flash
                 btn.textContent = 'ERR';
                 btn.style.background = CONFIG.COLORS.error;
                 setTimeout(() => {
@@ -484,5 +486,16 @@
         }
     };
 
-    setTimeout(() => { UI.init(); Logic.checkServer(); setInterval(() => Scanner.scan(), 1000); }, 1500);
+    // --- BOOTSTRAP ---
+    setTimeout(() => {
+        UI.init();
+        Logic.checkServer(); 
+        
+        // Fast Scan (UI Update)
+        setInterval(() => Scanner.scan(), CONFIG.DOM_SCAN_INTERVAL);
+        
+        // Slow Heartbeat (Server Sync)
+        setInterval(() => Logic.checkServer(), CONFIG.SERVER_POLL_INTERVAL);
+    }, 1500);
+
 })();
