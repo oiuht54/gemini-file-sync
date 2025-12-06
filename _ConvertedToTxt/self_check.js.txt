@@ -1,4 +1,0 @@
-﻿const fs = require('fs');
-const path = require('path');
-console.log("✅ Bridge is operational!");
-console.log(`Time of sync: ${new Date().toISOString()}`);
