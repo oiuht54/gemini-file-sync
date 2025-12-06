@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         AI Studio Workspace Manager (v10.1 - Active Dir Display)
+// @name         AI Studio Workspace Manager (v11.0 - Thumb Anchor)
 // @namespace    http://tampermonkey.net/
-// @version      10.1
-// @description  Shows the currently active server directory explicitly.
+// @version      11.0
+// @description  Uses the 'Thumb Up' icon to strictly identify the latest AI response container.
 // @author       Gemini 3 Architect
 // @match        https://aistudio.google.com/*
 // @grant        none
@@ -101,11 +101,10 @@
                 display: State.isCollapsed ? 'none' : 'flex', flexDirection: 'column', padding: '12px', gap: '10px' 
             });
 
-            // Settings Row (Input)
             const settings = el('div', { display: 'flex', gap: '5px' });
             this.pathInput = el('input', {
                 flex: '1', background: '#222', border: '1px solid #444', color: '#fff', padding: '8px', borderRadius: '4px'
-            }, { placeholder: 'Change Project Root...' });
+            }, { placeholder: 'Project Root...' });
             
             const dl = document.createElement('datalist'); dl.id = 'br-hist'; document.body.appendChild(dl);
             this.historySelect = dl;
@@ -117,7 +116,6 @@
             setBtn.onclick = Logic.setProjectRoot;
             settings.append(this.pathInput, setBtn);
 
-            // Active Path Display (NEW)
             this.activeRootLabel = el('div', {
                 fontSize: '10px', color: '#888', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
                 padding: '0 2px', cursor: 'help'
@@ -166,18 +164,12 @@
         updateStatus(connected, data) {
             this.statusDot.style.backgroundColor = connected ? CONFIG.COLORS.success : CONFIG.COLORS.error;
             if (connected && data) {
-                // Update Active Label
                 if (data.cwd) {
                     this.activeRootLabel.textContent = `📂 ${data.cwd}`;
-                    this.activeRootLabel.title = data.cwd; // Full path on hover
+                    this.activeRootLabel.title = data.cwd;
                     this.activeRootLabel.style.color = '#aaa';
                 }
-                
-                // Only update input if empty (to avoid overwriting user typing)
-                if (this.pathInput.value === '') {
-                    this.pathInput.value = data.cwd;
-                }
-
+                if (this.pathInput.value === '') this.pathInput.value = data.cwd;
                 if (data.history) {
                     clearChildren(this.historySelect);
                     data.history.forEach(p => this.historySelect.appendChild(el('option', { value: p })));
@@ -200,7 +192,7 @@
             clearChildren(this.fileList);
             
             if (files.length === 0) {
-                this.statusLabel.textContent = "Latest message has no code.";
+                this.statusLabel.textContent = "Last message is text-only.";
                 this.syncBtn.disabled = true;
                 this.syncBtn.textContent = "NO FILES";
                 this.syncBtn.style.background = '#222';
@@ -246,7 +238,7 @@
                 });
                 const data = await res.json();
                 if(data.success) {
-                    UI.pathInput.value = ''; // Clear input on success to show we accepted it
+                    UI.pathInput.value = ''; 
                     UI.updateStatus(true, data);
                 }
             } catch { alert("Connection Error"); }
@@ -307,30 +299,55 @@
             return isValid ? p : null;
         },
 
-        getScope(lastBlock) {
-            let scope = lastBlock;
-            for (let i = 0; i < 6; i++) {
-                if (scope.parentElement) scope = scope.parentElement;
-                if (scope.tagName && (scope.tagName.includes('CHUNK') || scope.classList.contains('model-response-container'))) {
-                    return scope;
+        findLastModelResponseContainer() {
+            // STRATEGY: Find the last "Thumb Up" icon.
+            // This icon is unique to Model Responses.
+            const icons = Array.from(document.querySelectorAll('mat-icon, i.google-material-icons, span.material-symbols-outlined'));
+            
+            // Look for thumb_up (filled or outline)
+            const thumbIcons = icons.filter(i => {
+                const txt = i.innerText.trim().toLowerCase();
+                return txt.includes('thumb_up');
+            });
+
+            if (thumbIcons.length === 0) return null; // No model response yet?
+
+            const lastThumb = thumbIcons[thumbIcons.length - 1];
+
+            // Now climb up to find the Message Bubble container.
+            // We want the container that holds the text chunks and code blocks.
+            // Usually it's ~4-6 levels up.
+            // We stop when we hit a container that has multiple siblings (the list item)
+            
+            let container = lastThumb;
+            for(let i=0; i<8; i++) {
+                if(!container.parentElement) break;
+                container = container.parentElement;
+                
+                // Detection: Does this container have 'ms-code-block' or 'ms-text-chunk' as direct descendants?
+                // Or is it the main wrapper?
+                // Heuristic: If it contains the thumb icon AND has text content, it's likely the wrapper.
+                // Let's rely on finding a container that holds the content.
+                if (container.querySelector('ms-text-chunk') || container.querySelector('ms-code-block')) {
+                    // This is likely the message content wrapper.
+                    // Let's go one level higher to be safe (to catch all chunks).
+                    return container.parentElement || container;
                 }
             }
-            return scope;
+            return lastThumb.parentElement?.parentElement?.parentElement; // Fallback
         },
 
         scan() {
             try {
-                const allBlocks = Array.from(document.querySelectorAll('ms-code-block'));
-                if (allBlocks.length === 0) {
+                const scope = this.findLastModelResponseContainer();
+                
+                if (!scope) {
                     this.currentFiles = []; UI.renderFiles([]); return;
                 }
 
-                // TRUST THE LAST BLOCK
-                const lastBlock = allBlocks[allBlocks.length - 1];
-                const scope = this.getScope(lastBlock);
+                // Scan strictly inside the scope of the Last AI Response
                 const activeBlocks = Array.from(scope.querySelectorAll('ms-code-block'));
                 const headers = Array.from(scope.querySelectorAll('h3, h4, strong, p, span'));
-                
                 const fileMap = new Map();
 
                 activeBlocks.forEach(block => {
