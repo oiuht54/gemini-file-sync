@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         AI Studio Workspace Manager (v7.0 - Structure Check)
+// @name         AI Studio Workspace Manager (v8.1 - Big Buttons)
 // @namespace    http://tampermonkey.net/
-// @version      7.0
-// @description  Robustly identifies if the code block belongs to the absolute last message bubble in the chat list.
+// @version      8.1
+// @description  Larger UI controls. Reads collapsed/hidden code blocks.
 // @author       Gemini 3 Architect
 // @match        https://aistudio.google.com/*
 // @grant        none
@@ -15,8 +15,14 @@
         API_BASE: 'http://localhost:3000',
         COLORS: {
             bg: '#121212', bgHeader: '#1e1e1e', border: '#333',
-            accent: '#0d96f2', success: '#4caf50', error: '#f44336', text: '#e0e0e0'
+            accent: '#0d96f2', success: '#4caf50', error: '#f44336', text: '#e0e0e0',
+            btnBg: '#333', btnHover: '#444'
         }
+    };
+
+    const State = {
+        isCollapsed: localStorage.getItem('ai_bridge_collapsed') === 'true',
+        serverConnected: false
     };
 
     // --- DOM HELPERS ---
@@ -41,9 +47,11 @@
             const old = document.getElementById('ai-bridge-v2');
             if (old) old.remove();
 
+            // Root Container
             this.root = el('div', {
                 position: 'fixed', bottom: '20px', right: '20px',
-                width: '340px', backgroundColor: CONFIG.COLORS.bg,
+                width: State.isCollapsed ? '220px' : '340px', // Slightly wider collapsed state for big buttons
+                backgroundColor: CONFIG.COLORS.bg,
                 border: `1px solid ${CONFIG.COLORS.border}`, borderRadius: '8px',
                 fontFamily: 'Consolas, monospace', fontSize: '12px', color: CONFIG.COLORS.text,
                 zIndex: '999999', boxShadow: '0 10px 30px rgba(0,0,0,0.9)',
@@ -51,49 +59,99 @@
             });
             this.root.id = 'ai-bridge-v2';
 
+            // Header
             this.header = el('div', {
-                padding: '10px', backgroundColor: CONFIG.COLORS.bgHeader,
-                borderBottom: `1px solid ${CONFIG.COLORS.border}`,
-                display: 'flex', justifyContent: 'space-between', alignItems: 'center'
+                padding: '8px 12px', backgroundColor: CONFIG.COLORS.bgHeader,
+                borderBottom: State.isCollapsed ? 'none' : `1px solid ${CONFIG.COLORS.border}`,
+                display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                height: '40px' // Fixed height for header
             });
 
-            const titleRow = el('div', { display: 'flex', alignItems: 'center', gap: '8px' });
+            // Title
+            const titleRow = el('div', { display: 'flex', alignItems: 'center', gap: '10px' });
             this.statusDot = el('div', {
-                width: '10px', height: '10px', borderRadius: '50%', backgroundColor: '#555', cursor: 'help'
+                width: '12px', height: '12px', borderRadius: '50%', backgroundColor: '#555', cursor: 'help'
             }, { title: 'Checking connection...' });
-            titleRow.append(this.statusDot, el('span', { fontWeight: 'bold' }, 'AI WORKSPACE v7.0'));
+            
+            const titleText = el('span', { fontWeight: 'bold', fontSize: '13px' }, 'AI BRIDGE');
+            titleRow.append(this.statusDot, titleText);
 
-            this.scanBtn = el('button', {
-                background: 'transparent', border: 'none', color: '#fff', cursor: 'pointer', fontSize: '14px'
-            }, { textContent: '↻', title: 'Force Scan' });
-            this.scanBtn.onclick = () => { Logic.checkServer(); Scanner.scan(); };
+            // Controls (Scan + Minimize) - NOW BIGGER
+            const controlsRow = el('div', { display: 'flex', gap: '8px' });
+            
+            const btnStyle = {
+                background: CONFIG.COLORS.btnBg,
+                border: '1px solid #444',
+                color: '#fff',
+                cursor: 'pointer',
+                fontSize: '16px',
+                padding: '0',
+                width: '32px',
+                height: '32px',
+                borderRadius: '4px',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                transition: 'background 0.2s'
+            };
 
-            this.header.append(titleRow, this.scanBtn);
+            this.scanBtn = el('button', btnStyle, { textContent: '↻', title: 'Force Scan' });
+            this.scanBtn.onmouseover = () => this.scanBtn.style.background = CONFIG.COLORS.btnHover;
+            this.scanBtn.onmouseout = () => this.scanBtn.style.background = CONFIG.COLORS.btnBg;
+            this.scanBtn.onclick = (e) => { 
+                e.stopPropagation(); 
+                this.scanBtn.style.transform = 'rotate(360deg)';
+                this.scanBtn.style.transition = 'transform 0.4s';
+                setTimeout(() => { this.scanBtn.style.transform = 'none'; this.scanBtn.style.transition = 'background 0.2s'; }, 400);
+                Logic.checkServer(); 
+                Scanner.scan(); 
+            };
 
-            this.body = el('div', { display: 'flex', flexDirection: 'column', padding: '10px', gap: '10px' });
+            this.toggleBtn = el('button', btnStyle, { textContent: State.isCollapsed ? '+' : '−', title: 'Minimize/Maximize' });
+            this.toggleBtn.onmouseover = () => this.toggleBtn.style.background = CONFIG.COLORS.btnHover;
+            this.toggleBtn.onmouseout = () => this.toggleBtn.style.background = CONFIG.COLORS.btnBg;
+            this.toggleBtn.onclick = (e) => { e.stopPropagation(); this.toggleCollapse(); };
+
+            controlsRow.append(this.scanBtn, this.toggleBtn);
+            this.header.append(titleRow, controlsRow);
+
+            // Click header to toggle (except buttons)
+            this.header.onclick = (e) => {
+                if (e.target !== this.scanBtn && e.target !== this.toggleBtn && e.target.parentNode !== this.scanBtn && e.target.parentNode !== this.toggleBtn) {
+                    this.toggleCollapse();
+                }
+            };
+
+            // Body
+            this.body = el('div', { 
+                display: State.isCollapsed ? 'none' : 'flex', 
+                flexDirection: 'column', padding: '12px', gap: '10px' 
+            });
 
             const settings = el('div', { display: 'flex', gap: '5px' });
             this.pathInput = el('input', {
-                flex: '1', background: '#222', border: '1px solid #444', color: '#fff', padding: '4px'
+                flex: '1', background: '#222', border: '1px solid #444', color: '#fff', padding: '8px', borderRadius: '4px'
             }, { placeholder: 'Project Root...' });
             
             const dl = document.createElement('datalist'); dl.id = 'br-hist'; document.body.appendChild(dl);
             this.historySelect = dl;
             this.pathInput.setAttribute('list', 'br-hist');
 
-            const setBtn = el('button', { background: '#333', color: '#fff', border: 'none', cursor: 'pointer', padding: '0 8px' }, { textContent: 'SET' });
+            const setBtn = el('button', { 
+                background: '#333', color: '#fff', border: 'none', cursor: 'pointer', padding: '0 12px', borderRadius: '4px', fontWeight: 'bold' 
+            }, { textContent: 'SET' });
             setBtn.onclick = Logic.setProjectRoot;
             settings.append(this.pathInput, setBtn);
 
-            this.statusLabel = el('div', { textAlign: 'center', color: '#888' }, 'Idle');
+            this.statusLabel = el('div', { textAlign: 'center', color: '#888', padding: '4px' }, 'Idle');
             
             this.fileList = el('div', {
-                maxHeight: '150px', overflowY: 'auto', background: '#000', border: '1px solid #333',
-                padding: '5px', display: 'flex', flexDirection: 'column', gap: '2px'
+                maxHeight: '180px', overflowY: 'auto', background: '#000', border: '1px solid #333',
+                padding: '5px', display: 'flex', flexDirection: 'column', gap: '2px', borderRadius: '4px'
             });
 
             this.syncBtn = el('button', {
-                padding: '10px', background: '#222', color: '#555', border: 'none', fontWeight: 'bold', cursor: 'not-allowed'
+                padding: '14px', background: '#222', color: '#555', border: 'none', fontWeight: 'bold', cursor: 'not-allowed', borderRadius: '4px', fontSize: '13px'
             }, { textContent: 'NO FILES' });
             this.syncBtn.disabled = true;
             this.syncBtn.onclick = Logic.syncFiles;
@@ -101,6 +159,16 @@
             this.body.append(settings, this.statusLabel, this.fileList, this.syncBtn);
             this.root.append(this.header, this.body);
             document.body.appendChild(this.root);
+        },
+
+        toggleCollapse() {
+            State.isCollapsed = !State.isCollapsed;
+            localStorage.setItem('ai_bridge_collapsed', State.isCollapsed);
+            
+            this.root.style.width = State.isCollapsed ? '220px' : '340px';
+            this.body.style.display = State.isCollapsed ? 'none' : 'flex';
+            this.header.style.borderBottom = State.isCollapsed ? 'none' : `1px solid ${CONFIG.COLORS.border}`;
+            this.toggleBtn.textContent = State.isCollapsed ? '+' : '−';
         },
 
         updateStatus(connected, data) {
@@ -115,6 +183,7 @@
         },
 
         renderFiles(files) {
+            if (!this.fileList) return; 
             clearChildren(this.fileList);
             
             if (files.length === 0) {
@@ -136,7 +205,7 @@
             }
 
             files.forEach(f => {
-                const row = el('div', { display: 'flex', justifyContent: 'space-between', borderBottom: '1px solid #222', padding: '2px' });
+                const row = el('div', { display: 'flex', justifyContent: 'space-between', borderBottom: '1px solid #222', padding: '4px' });
                 row.append(
                     el('span', { color: '#ddd' }, f.path),
                     el('span', { color: '#555' }, `${f.content.length}b`)
@@ -184,7 +253,7 @@
         }
     };
 
-    // --- SCANNER (STRUCTURAL CHECK) ---
+    // --- SCANNER ---
     const Scanner = {
         currentFiles: [],
 
@@ -197,44 +266,24 @@
             return isValid ? p : null;
         },
 
-        // This function determines if a code block is inside the LAST child of the Message List
         isInLastMessageBubble(codeBlock) {
             let container = codeBlock;
-            // Climb up to find the "Message List"
-            // The Message List is a container that has multiple children which look like messages.
-            
-            for (let i = 0; i < 12; i++) { // Limit depth
+            for (let i = 0; i < 12; i++) {
                 if (!container.parentElement) break;
-                
                 const parent = container.parentElement;
-                
-                // Heuristic: If parent has > 1 children, and we are one of them.
                 if (parent.childElementCount > 1) {
-                    
-                    // Does the parent look like a list? (e.g. infinite scroll container)
-                    // Check if our current 'container' is the LAST child of 'parent'
                     if (parent.lastElementChild === container) {
-                        
-                        // We are in the last child!
-                        // But we need to be sure this is the MAIN list, not a sub-list.
-                        // If we are deep inside a message, this condition might trigger for a paragraph list.
-                        // However, usually code blocks are not inside lists inside messages.
-                        // They are usually direct children of the message body.
-                        
-                        // Let's verify: Is there any 'ms-code-block' in previous siblings?
-                        // If yes, then this is likely the main list or a major container.
                         return true; 
                     } else {
-                        // We are NOT in the last child. 
-                        // e.g. We are in Child N-1. Child N is the new text message.
-                        // This definitively means we are OLD.
+                        const last = parent.lastElementChild;
+                        if (last.innerText.trim() === '' || last.tagName.includes('LOADER')) {
+                            if (last.previousElementSibling === container) return true;
+                        }
                         return false;
                     }
                 }
                 container = parent;
             }
-            // If we couldn't find a list structure, fallback to True (assume single message view?)
-            // Or False (safe)? Let's assume True if we can't prove it's old.
             return true;
         },
 
@@ -247,30 +296,24 @@
 
                 const lastBlock = allBlocks[allBlocks.length - 1];
 
-                // 1. Structural Freshness Check
                 if (!this.isInLastMessageBubble(lastBlock)) {
                     this.currentFiles = [];
                     UI.renderFiles([]);
                     return;
                 }
 
-                // 2. Scan scope (similar to previous versions)
-                let scope = lastBlock.parentElement; 
-                while(scope && scope.childElementCount < 2) scope = scope.parentElement; 
-                if(!scope) scope = document.body;
-
+                const activeBlocks = allBlocks.filter(b => this.isInLastMessageBubble(b));
                 const headers = Array.from(document.querySelectorAll('h3, h4, strong, p, span'));
                 const fileMap = new Map();
-
-                // Get all blocks in this last message
-                // We know lastBlock is in it. Let's find others in the same scope.
-                // Actually, filtering by isInLastMessageBubble for ALL blocks is safer.
-                
-                const activeBlocks = allBlocks.filter(b => this.isInLastMessageBubble(b));
 
                 activeBlocks.forEach(block => {
                     const codeEl = block.querySelector('code');
                     if (!codeEl) return;
+                    
+                    // Use textContent to read hidden/collapsed code
+                    const content = codeEl.textContent; 
+                    if (!content) return;
+
                     let bestPath = null;
                     for (const header of headers) {
                         if (header.compareDocumentPosition(block) & Node.DOCUMENT_POSITION_FOLLOWING) {
@@ -279,7 +322,7 @@
                         }
                     }
                     if (bestPath) {
-                        fileMap.set(bestPath, { path: bestPath, content: codeEl.innerText });
+                        fileMap.set(bestPath, { path: bestPath, content: content });
                     }
                 });
 
