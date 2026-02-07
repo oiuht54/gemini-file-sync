@@ -82,7 +82,7 @@ For the bridge to detect files correctly, the LLM must output the file path imme
 
 ## Видеоруководство: https://youtu.be/6KFu1nWlxok
 
-## Системная инструкция: https://pastebin.com/GrTWr9e8 или если не открывается можете вязть отсюда https://raw.githubusercontent.com/oiuht54/gemini-file-sync/refs/heads/main/system%20instructions.md
+## Системная инструкция: https://pastebin.com/GrTWr9e8 или если не открывается можете взять отсюда https://raw.githubusercontent.com/oiuht54/gemini-file-sync/refs/heads/main/system%20instructions.md
 
 **AI Studio Local Bridge** — это инструмент для разработчиков, который соединяет Google AI Studio (Gemini) с вашей локальной файловой системой. Он избавляет от необходимости вручную копировать и вставлять файлы с кодом, сгенерированные нейросетью.
 
