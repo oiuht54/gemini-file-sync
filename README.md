@@ -1,6 +1,6 @@
 # AI Studio Local Bridge 🌉
 
-# Instruction: https://pastebin.com/GrTWr9e8 or https://raw.githubusercontent.com/oiuht54/gemini-file-sync/refs/heads/main/system%20instructions.md
+## Instruction: https://pastebin.com/GrTWr9e8 or https://raw.githubusercontent.com/oiuht54/gemini-file-sync/refs/heads/main/system%20instructions.md
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
