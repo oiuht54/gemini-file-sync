@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         AI Studio Workspace Manager (v14.0 - Selective Sync)
+// @name         AI Studio Workspace Manager (v15.0 - Selective Sync & Raw MD Fallback)
 // @namespace    http://tampermonkey.net/
-// @version      14.0
-// @description  Click on files to exclude/include them from sync.
+// @version      15.0
+// @description  Click on files to exclude/include them from sync. Includes Raw Markdown fallback parser.
 // @author       Gemini 3 Architect
 // @match        https://aistudio.google.com/*
 // @grant        none
@@ -35,7 +35,7 @@
         serverConnected: false,
         manualScope: null,
         isSelecting: false,
-        ignoredPaths: new Set() // Stores paths user wants to skip
+        ignoredPaths: new Set()
     };
 
     // --- DOM HELPERS ---
@@ -158,7 +158,7 @@
             this.scanBtn.onclick = (e) => {
                 e.stopPropagation();
                 State.manualScope = null; Selector.disable();
-                State.ignoredPaths.clear(); // Clear ignored on full reset
+                State.ignoredPaths.clear();
                 this.scanBtn.style.transform = 'rotate(360deg)';
                 this.scanBtn.style.transition = 'transform 0.4s';
                 setTimeout(() => { this.scanBtn.style.transform = 'none'; this.scanBtn.style.transition = ''; }, 400);
@@ -266,10 +266,8 @@
             if (!this.fileList) return;
             clearChildren(this.fileList);
 
-            // Calculate active files (not ignored)
             const activeFiles = files.filter(f => !State.ignoredPaths.has(f.path));
 
-            // Status Label Updates
             if (State.manualScope) {
                 this.statusLabel.textContent = `LOCKED: Manual Selection`;
                 this.statusLabel.style.color = CONFIG.COLORS.warn;
@@ -281,7 +279,6 @@
                 this.statusLabel.style.color = CONFIG.COLORS.success;
             }
 
-            // Sync Button Updates
             if (activeFiles.length === 0 && files.length === 0) {
                 this.syncBtn.disabled = true;
                 this.syncBtn.textContent = "NO FILES";
@@ -309,7 +306,7 @@
                     display: 'flex', justifyContent: 'space-between',
                     borderBottom: '1px solid #222', padding: '6px 4px',
                     cursor: 'pointer', transition: 'all 0.2s',
-                    className: 'ai-bridge-file-row', // hook for hover style
+                    className: 'ai-bridge-file-row',
                     opacity: isIgnored ? '0.4' : '1'
                 });
 
@@ -328,7 +325,6 @@
                 row.onclick = () => {
                     if (isIgnored) State.ignoredPaths.delete(f.path);
                     else State.ignoredPaths.add(f.path);
-                    // Re-render to reflect changes immediately
                     UI.renderFiles(files);
                 };
 
@@ -371,7 +367,6 @@
             }
         },
         async syncFiles() {
-            // Filter ignored files before sending
             const files = Scanner.currentFiles.filter(f => !State.ignoredPaths.has(f.path));
 
             if(!files || !files.length) return;
@@ -414,17 +409,26 @@
         currentFiles: [],
 
         getPath(text) {
-            if (!text || text.length > 300) return null;
+            if (!text) return null;
+            // Limit analysis to the last 1000 characters to ensure we capture relevant context
+            // without picking up stray filenames from early in large unformatted messages.
+            text = text.slice(-1000);
+
             const godotMatch = text.match(/(res:\/\/[a-zA-Z0-9_\-./]+|user:\/\/[a-zA-Z0-9_\-./]+)/);
             if (godotMatch) return godotMatch[0];
 
-            const candidates = text.matchAll(/([a-zA-Z0-9_\-./\\]+\.[a-zA-Z0-9]+)/g);
+            const candidates = Array.from(text.matchAll(/([a-zA-Z0-9_\-./\\]+\.[a-zA-Z0-9]+)/g));
             let bestCandidate = null;
             let maxScore = -1;
 
-            for (const match of candidates) {
+            for (let i = 0; i < candidates.length; i++) {
+                const match = candidates[i];
                 let p = match[0];
-                p = p.replace(/[:.,;!?]$/, '');
+
+                // Aggressive cleanup for raw markdown text artifacts around file paths
+                p = p.replace(/[:.,;!?]+$/, '');
+                p = p.replace(/[*"'`]+$/, '').replace(/^[*"'`]+/, '');
+
                 if (p.startsWith('http://') || p.startsWith('https://') || p.startsWith('www.') || p.startsWith('ftp://')) continue;
 
                 let score = 0;
@@ -438,6 +442,9 @@
                 if (/^[0-9.]+$/.test(p) || /^v[0-9.]+$/.test(p)) score -= 10;
                 if (p.length < 3) score -= 5;
 
+                // Positional scoring multiplier ensures paths closer to the code block win ties
+                score += (i * 0.1);
+
                 if (score > maxScore && score > 0) {
                     maxScore = score;
                     bestCandidate = p;
@@ -445,6 +452,38 @@
             }
             if (bestCandidate) return bestCandidate.replace(/\\/g, '/');
             return null;
+        },
+
+        parseRawMarkdown(text) {
+            const fileMap = new Map();
+            if (!text) return fileMap;
+
+            // Regex matches triple backticks blocks.
+            // Group 1: Optional language tag & newline. Group 2: The actual code payload.
+            const blockRegex = /```([^\n]*\n)?([\s\S]*?)```/g;
+            let match;
+            let lastIndex = 0;
+
+            while ((match = blockRegex.exec(text)) !== null) {
+                let codeContent = match[2];
+                if (!codeContent) continue;
+
+                // Strip fully empty leading/trailing line breaks but preserve intentional indentation
+                codeContent = codeContent.replace(/^\r?\n|\r?\n$/g, '');
+
+                // Isolate the text chunk existing exactly between the previous code block and the current one
+                const textBefore = text.substring(lastIndex, match.index);
+
+                const path = this.getPath(textBefore);
+
+                if (path) {
+                    fileMap.set(path, { path: path, content: codeContent });
+                }
+
+                lastIndex = match.index + match[0].length;
+            }
+
+            return fileMap;
         },
 
         findLastModelResponseContainer() {
@@ -481,32 +520,50 @@
                     this.currentFiles = []; UI.renderFiles([]); return;
                 }
 
-                const activeBlocks = Array.from(scope.querySelectorAll('ms-code-block'));
-                const headers = Array.from(scope.querySelectorAll('h3, h4, strong, p, span, li'));
                 const fileMap = new Map();
 
-                activeBlocks.forEach(block => {
-                    const codeEl = block.querySelector('code');
-                    if (!codeEl) return;
-                    const content = codeEl.textContent;
-                    if (!content) return;
+                // Layer 1: Clean DOM Parsing (if markdown rendered correctly)
+                const activeBlocks = Array.from(scope.querySelectorAll('ms-code-block'));
+                if (activeBlocks.length > 0) {
+                    const headers = Array.from(scope.querySelectorAll('h3, h4, strong, p, span, li'));
 
-                    let bestPath = null;
-                    for (const header of headers) {
-                        if (header.compareDocumentPosition(block) & Node.DOCUMENT_POSITION_FOLLOWING) {
-                            const p = this.getPath(header.innerText);
-                            if (p) bestPath = p;
+                    activeBlocks.forEach(block => {
+                        const codeEl = block.querySelector('code');
+                        if (!codeEl) return;
+                        const content = codeEl.textContent;
+                        if (!content) return;
+
+                        let bestPath = null;
+                        for (const header of headers) {
+                            if (header.compareDocumentPosition(block) & Node.DOCUMENT_POSITION_FOLLOWING) {
+                                const headerText = header.innerText || header.textContent;
+                                const p = this.getPath(headerText);
+                                if (p) bestPath = p;
+                            }
                         }
+                        if (bestPath) {
+                            fileMap.set(bestPath, { path: bestPath, content: content });
+                        }
+                    });
+                }
+
+                // Layer 2: Raw Text Parsing (Defense in depth strategy)
+                // Always analyzes the raw inner text. If formatting broke, it catches missing files.
+                const rawText = scope.innerText || scope.textContent || "";
+                const rawMap = this.parseRawMarkdown(rawText);
+
+                // Merge strategies preferring DOM structure when available to avoid regex mangling issues,
+                // but seamlessly incorporating any files found solely via the Raw Markdown Parser.
+                for (const [k, v] of rawMap.entries()) {
+                    if (!fileMap.has(k)) {
+                        fileMap.set(k, v);
                     }
-                    if (bestPath) {
-                        fileMap.set(bestPath, { path: bestPath, content: content });
-                    }
-                });
+                }
 
                 this.currentFiles = Array.from(fileMap.values());
                 UI.renderFiles(this.currentFiles);
 
-            } catch (e) { console.error(e); }
+            } catch (e) { console.error("Scanner Error:", e); }
         }
     };
 
